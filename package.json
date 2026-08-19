@@ -1,6 +1,6 @@
 {
   "name": "cursor-origin-webhooks",
-  "version": "0.1.0",
+  "version": "0.0.1",
   "description": "Verify and type Cursor Origin webhooks in WebCrypto runtimes.",
   "repository": {
     "type": "git",
