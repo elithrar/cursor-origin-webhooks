@@ -73,6 +73,17 @@ import { verifyWebhook } from "npm:cursor-origin-webhooks";
 const webhook = await verifyWebhook(request);
 ```
 
+## Configure an Origin App
+
+1. Open [Cursor's Origin app settings](https://cursor.com/codebase/settings/apps)
+   and create an app.
+2. Set its webhook URL to your public HTTPS endpoint.
+3. Select the events to send, then install the app for the relevant Origin
+   repositories.
+
+See Cursor's [Origin webhook documentation](https://cursor.com/docs/api/origin#webhooks)
+for the event list and delivery details.
+
 ## Options
 
 ```ts
