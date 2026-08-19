@@ -1,0 +1,66 @@
+{
+  "name": "cursor-origin-webhooks",
+  "version": "0.1.0",
+  "description": "Verify and type Cursor Origin webhooks in WebCrypto runtimes.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/elithrar/cursor-origin-webhooks.git"
+  },
+  "bugs": {
+    "url": "https://github.com/elithrar/cursor-origin-webhooks/issues"
+  },
+  "homepage": "https://github.com/elithrar/cursor-origin-webhooks#readme",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "check": "npm run generate:types && npm run typecheck && npm test && npm run test:workers && npm run test:deno && npm run test:coverage && npm run build && npm run validate:package && npm run validate:example",
+    "clean": "rm -rf dist coverage",
+    "generate:types": "node scripts/generate-types.mjs",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "test:deno": "deno test --sloppy-imports tests/deno/webhook_test.ts",
+    "test:workers": "XDG_CONFIG_HOME=.wrangler/config WRANGLER_LOG_PATH=.wrangler/wrangler.log vitest run --config vitest.workers.config.ts",
+    "prepack": "npm run build",
+    "typecheck": "tsc --noEmit",
+    "validate:package": "npm_config_cache=.npm-cache publint",
+    "validate:example": "npm run build && npm_config_cache=.npm-cache npm --prefix examples/cloudflare-workers/basic ci && npm --prefix examples/cloudflare-workers/basic run check"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "cursor",
+    "origin",
+    "webhooks",
+    "cloudflare-workers",
+    "deno",
+    "webcrypto",
+    "ed25519"
+  ],
+  "license": "Apache-2.0",
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.22.0",
+    "@cloudflare/workers-types": "^5.20260819.1",
+    "@types/node": "^26.0.0",
+    "@vitest/coverage-v8": "^4.1.11",
+    "deno": "^2.9.5",
+    "openapi-typescript": "^7.13.0",
+    "publint": "^0.3.24",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.11",
+    "wrangler": "^4.124.0",
+    "yaml": "^2.8.1"
+  }
+}

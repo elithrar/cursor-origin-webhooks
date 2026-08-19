@@ -1,0 +1,6 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "cursor-origin-webhooks-tests",
+  "main": "tests/fixtures/worker.ts",
+  "compatibility_date": "2026-08-19"
+}

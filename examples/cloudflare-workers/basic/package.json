@@ -1,0 +1,22 @@
+{
+  "name": "cursor-origin-webhook-worker-example",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "npm run types:check && npm run typecheck && npm run deploy:dry-run",
+    "deploy": "XDG_CONFIG_HOME=.wrangler/config WRANGLER_LOG_PATH=.wrangler/wrangler.log wrangler deploy",
+    "deploy:dry-run": "XDG_CONFIG_HOME=.wrangler/config WRANGLER_LOG_PATH=.wrangler/wrangler.log wrangler deploy --dry-run --outdir .wrangler/dry-run",
+    "dev": "XDG_CONFIG_HOME=.wrangler/config WRANGLER_LOG_PATH=.wrangler/wrangler.log wrangler dev",
+    "typecheck": "tsc --noEmit",
+    "types": "XDG_CONFIG_HOME=.wrangler/config WRANGLER_LOG_PATH=.wrangler/wrangler.log wrangler types",
+    "types:check": "XDG_CONFIG_HOME=.wrangler/config WRANGLER_LOG_PATH=.wrangler/wrangler.log wrangler types --check"
+  },
+  "dependencies": {
+    "cursor-origin-webhooks": "file:../../.."
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "wrangler": "^4.124.0"
+  }
+}
