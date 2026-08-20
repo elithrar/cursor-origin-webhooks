@@ -5,6 +5,9 @@ const JWKS_URL = "https://api.cursor.com/v1/origin/keys";
 const FALLBACK_TTL_MS = 10 * 60 * 1000;
 const MAX_TTL_MS = 60 * 60 * 1000;
 const FORCED_REFRESH_COOLDOWN_MS = 60 * 1000;
+const FETCH_TIMEOUT_MS = 5 * 1000;
+const FETCH_RETRIES = 3;
+const FETCH_RETRY_DELAY_MS = 100;
 
 interface CachedKeys {
   keys: readonly CryptoKey[];
@@ -13,6 +16,16 @@ interface CachedKeys {
 }
 
 let cachedKeys: CachedKeys | undefined;
+let nextRefreshSequence = 0;
+let publishedRefreshSequence = 0;
+let lastRefreshStartedAt = Number.NEGATIVE_INFINITY;
+
+class RetryableJwksResponseError extends Error {
+  constructor(readonly status: number) {
+    super(`Cursor JWKS request failed with HTTP ${status}.`);
+    this.name = "RetryableJwksResponseError";
+  }
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -51,15 +64,37 @@ function unavailable(message: string): WebhookKeyUnavailable {
   return new WebhookKeyUnavailable({ cause: new Error(message) });
 }
 
+async function fetchJwksResponse(): Promise<Response> {
+  const response = await fetch(JWKS_URL, {
+    headers: { accept: "application/json" },
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+  });
+
+  if (response.status >= 500) {
+    await response.body?.cancel();
+    throw new RetryableJwksResponseError(response.status);
+  }
+
+  return response;
+}
+
 async function fetchKeys(): Promise<ResultType<CachedKeys, WebhookKeyUnavailable>> {
   return Result.gen(async function* () {
     const response = yield* Result.await(
-      Result.tryPromise({
-        try: () => fetch(JWKS_URL, {
-          headers: { accept: "application/json" },
-        }),
-        catch: (cause) => new WebhookKeyUnavailable({ cause }),
-      }),
+      Result.tryPromise(
+        {
+          try: fetchJwksResponse,
+          catch: (cause) => new WebhookKeyUnavailable({ cause }),
+        },
+        {
+          retry: {
+            times: FETCH_RETRIES,
+            delayMs: FETCH_RETRY_DELAY_MS,
+            backoff: "exponential",
+            jitter: true,
+          },
+        },
+      ),
     );
     if (!response.ok) {
       return Result.err(
@@ -84,16 +119,24 @@ async function fetchKeys(): Promise<ResultType<CachedKeys, WebhookKeyUnavailable
       );
     }
 
-    const imported = yield* Result.await(
-      Result.tryPromise({
-        try: () => Promise.all(
-          jwks.map((jwk) =>
-            crypto.subtle.importKey("jwk", jwk, { name: "Ed25519" }, false, ["verify"]),
+    const [imported] = await Result.partitionAsync(
+      jwks.map((jwk) =>
+        Result.tryPromise(() =>
+          crypto.subtle.importKey(
+            "jwk",
+            jwk,
+            { name: "Ed25519" },
+            false,
+            ["verify"],
           ),
         ),
-        catch: (cause) => new WebhookKeyUnavailable({ cause }),
-      }),
+      ),
     );
+    if (imported.length === 0) {
+      return Result.err(
+        unavailable("Cursor JWKS response contains no importable Ed25519 keys."),
+      );
+    }
 
     const fetchedAt = Date.now();
     return Result.ok({
@@ -108,9 +151,12 @@ async function refreshKeys(): Promise<ResultType<CachedKeys, WebhookKeyUnavailab
   // Do not retain the in-flight fetch promise globally. Workerd associates I/O
   // with the request that created it, so another request cannot safely await
   // that promise. The resolved CryptoKeys are safe to reuse across requests.
+  const refreshSequence = ++nextRefreshSequence;
+  lastRefreshStartedAt = Date.now();
   const refreshed = await fetchKeys();
-  if (refreshed.isOk()) {
+  if (refreshed.isOk() && refreshSequence > publishedRefreshSequence) {
     cachedKeys = refreshed.value;
+    publishedRefreshSequence = refreshSequence;
   }
   return refreshed;
 }
@@ -123,7 +169,7 @@ export async function getWebhookKeys(
   if (
     cachedKeys !== undefined &&
     ((!forceRefresh && now < cachedKeys.expiresAt) ||
-      (forceRefresh && now - cachedKeys.fetchedAt < FORCED_REFRESH_COOLDOWN_MS))
+      (forceRefresh && now - lastRefreshStartedAt < FORCED_REFRESH_COOLDOWN_MS))
   ) {
     return Result.ok(cachedKeys.keys);
   }

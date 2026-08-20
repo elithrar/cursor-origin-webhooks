@@ -97,9 +97,7 @@ export async function verifySignature(
     return Result.ok();
   }
 
-  const refreshedKeys = Result.flatten(
-    await Result.tryPromise(() => getWebhookKeys(true)),
-  );
+  const refreshedKeys = await getWebhookKeys(true);
   if (
     refreshedKeys.isOk() &&
     await verifyWithKeys(refreshedKeys.value, signatures, message)
