@@ -1,3 +1,4 @@
+import { Result, type Result as ResultType } from "better-result";
 import {
   InvalidWebhookContentType,
   InvalidWebhookMethod,
@@ -19,28 +20,35 @@ const DEFAULT_MAX_BODY_BYTES = 1024 * 1024;
 const DEFAULT_TIMESTAMP_TOLERANCE_SECONDS = 5 * 60;
 const eventTypes = new Set<string>(originWebhookEventTypes);
 
-function requiredHeader(headers: Headers, name: string): string {
+function requiredHeader(
+  headers: Headers,
+  name: string,
+): ResultType<string, MissingWebhookHeader> {
   const value = headers.get(name);
   if (value === null || value.length === 0) {
-    throw new MissingWebhookHeader(name);
+    return Result.err(new MissingWebhookHeader(name));
   }
-  return value;
+  return Result.ok(value);
 }
 
-function validateTimestamp(value: string, toleranceSeconds: number): void {
+function validateTimestamp(
+  value: string,
+  toleranceSeconds: number,
+): ResultType<void, InvalidWebhookTimestamp> {
   if (!/^\d+$/.test(value)) {
-    throw new InvalidWebhookTimestamp();
+    return Result.err(new InvalidWebhookTimestamp());
   }
 
   const timestamp = Number(value);
   if (!Number.isSafeInteger(timestamp)) {
-    throw new InvalidWebhookTimestamp();
+    return Result.err(new InvalidWebhookTimestamp());
   }
 
   const now = Math.floor(Date.now() / 1000);
   if (Math.abs(now - timestamp) > toleranceSeconds) {
-    throw new InvalidWebhookTimestamp();
+    return Result.err(new InvalidWebhookTimestamp());
   }
+  return Result.ok();
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -115,21 +123,26 @@ function validEventPayload(
   }
 }
 
-function parsePayload(value: unknown, webhookId: string): OriginWebhook {
+function parsePayload(
+  value: unknown,
+  webhookId: string,
+): ResultType<OriginWebhook, InvalidWebhookPayload> {
   if (!isRecord(value)) {
-    throw new InvalidWebhookPayload();
+    return Result.err(new InvalidWebhookPayload());
   }
 
   if (!nonEmptyString(value.deliveryId) || value.deliveryId !== webhookId) {
-    throw new InvalidWebhookPayload(
-      "The authenticated Origin webhook deliveryId does not match webhook-id.",
+    return Result.err(
+      new InvalidWebhookPayload(
+        "The authenticated Origin webhook deliveryId does not match webhook-id.",
+      ),
     );
   }
   if (!nonEmptyString(value.appId) || !nonEmptyString(value.installationId)) {
-    throw new InvalidWebhookPayload();
+    return Result.err(new InvalidWebhookPayload());
   }
   if (!isRecord(value.event)) {
-    throw new InvalidWebhookPayload();
+    return Result.err(new InvalidWebhookPayload());
   }
 
   const event = value.event;
@@ -140,17 +153,19 @@ function parsePayload(value: unknown, webhookId: string): OriginWebhook {
     !nonEmptyString(event.eventTime) ||
     !isRecord(event.payload)
   ) {
-    throw new InvalidWebhookPayload();
+    return Result.err(new InvalidWebhookPayload());
   }
 
   if (!validEventPayload(event.type, event.payload)) {
-    throw new InvalidWebhookPayload(
-      `The authenticated ${event.type} payload is missing required fields.`,
+    return Result.err(
+      new InvalidWebhookPayload(
+        `The authenticated ${event.type} payload is missing required fields.`,
+      ),
     );
   }
 
   const payload = event.payload as OriginWebhookPayloadMap[typeof event.type];
-  return {
+  return Result.ok({
     ...value,
     deliveryId: value.deliveryId,
     appId: value.appId,
@@ -162,55 +177,80 @@ function parsePayload(value: unknown, webhookId: string): OriginWebhook {
       eventTime: event.eventTime,
       payload,
     },
-  } as OriginWebhook;
+  } as OriginWebhook);
 }
 
-function positiveInteger(value: number | undefined, fallback: number, name: string): number {
+function positiveInteger(
+  value: number | undefined,
+  fallback: number,
+  name: string,
+): ResultType<number, RangeError> {
   const result = value ?? fallback;
   if (!Number.isSafeInteger(result) || result <= 0) {
-    throw new RangeError(`${name} must be a positive integer.`);
+    return Result.err(new RangeError(`${name} must be a positive integer.`));
   }
-  return result;
+  return Result.ok(result);
 }
 
-function nonNegativeInteger(value: number | undefined, fallback: number, name: string): number {
+function nonNegativeInteger(
+  value: number | undefined,
+  fallback: number,
+  name: string,
+): ResultType<number, RangeError> {
   const result = value ?? fallback;
   if (!Number.isSafeInteger(result) || result < 0) {
-    throw new RangeError(`${name} must be a non-negative integer.`);
+    return Result.err(new RangeError(`${name} must be a non-negative integer.`));
   }
-  return result;
+  return Result.ok(result);
+}
+
+async function verifyWebhookResult(
+  request: Request,
+  opts: WebhookOptions,
+) {
+  return Result.gen(async function* () {
+    if (request.method !== "POST") {
+      return Result.err(new InvalidWebhookMethod(request.method));
+    }
+
+    const contentType = request.headers.get("content-type");
+    if (
+      contentType === null ||
+      contentType.split(";", 1)[0]?.trim().toLowerCase() !== "application/json"
+    ) {
+      return Result.err(new InvalidWebhookContentType(contentType));
+    }
+
+    const webhookId = yield* requiredHeader(request.headers, "webhook-id");
+    const timestampHeader = yield* requiredHeader(request.headers, "webhook-timestamp");
+    const signature = yield* requiredHeader(request.headers, "webhook-signature");
+
+    const maxBodyBytes = yield* positiveInteger(
+      opts.maxBodyBytes,
+      DEFAULT_MAX_BODY_BYTES,
+      "maxBodyBytes",
+    );
+    const toleranceSeconds = yield* nonNegativeInteger(
+      opts.timestampToleranceSeconds,
+      DEFAULT_TIMESTAMP_TOLERANCE_SECONDS,
+      "timestampToleranceSeconds",
+    );
+    yield* validateTimestamp(timestampHeader, toleranceSeconds);
+    const body = yield* Result.await(readRequestBody(request, maxBodyBytes));
+
+    yield* Result.await(verifySignature(webhookId, timestampHeader, signature, body));
+    const parsed = yield* parseJsonBody(body);
+    return parsePayload(parsed, webhookId);
+  });
 }
 
 export async function verifyWebhook(
   request: Request,
   opts: WebhookOptions = {},
 ): Promise<OriginWebhook> {
-  if (request.method !== "POST") {
-    throw new InvalidWebhookMethod(request.method);
+  const result = await verifyWebhookResult(request, opts);
+  if (result.isErr()) {
+    throw result.error;
   }
-
-  const contentType = request.headers.get("content-type");
-  if (contentType === null || contentType.split(";", 1)[0]?.trim().toLowerCase() !== "application/json") {
-    throw new InvalidWebhookContentType(contentType);
-  }
-
-  const webhookId = requiredHeader(request.headers, "webhook-id");
-  const timestampHeader = requiredHeader(request.headers, "webhook-timestamp");
-  const signature = requiredHeader(request.headers, "webhook-signature");
-
-  const maxBodyBytes = positiveInteger(
-    opts.maxBodyBytes,
-    DEFAULT_MAX_BODY_BYTES,
-    "maxBodyBytes",
-  );
-  const toleranceSeconds = nonNegativeInteger(
-    opts.timestampToleranceSeconds,
-    DEFAULT_TIMESTAMP_TOLERANCE_SECONDS,
-    "timestampToleranceSeconds",
-  );
-  validateTimestamp(timestampHeader, toleranceSeconds);
-  const body = await readRequestBody(request, maxBodyBytes);
-
-  await verifySignature(webhookId, timestampHeader, signature, body);
-  return parsePayload(parseJsonBody(body), webhookId);
+  return result.value;
 }

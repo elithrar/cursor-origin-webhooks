@@ -251,13 +251,16 @@ describe("verifyWebhook", () => {
   });
 
   it("fails closed when the initial JWKS fetch fails", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network down")));
+    const networkError = new Error("network down");
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(networkError));
     const { WebhookKeyUnavailable, verifyWebhook } = await loadLibrary();
     const key = createTestKey();
+    const verification = verifyWebhook(signedRequest(key));
 
-    await expect(verifyWebhook(signedRequest(key))).rejects.toBeInstanceOf(
+    await expect(verification).rejects.toBeInstanceOf(
       WebhookKeyUnavailable,
     );
+    await expect(verification).rejects.toHaveProperty("cause", networkError);
   });
 
   it("rejects malformed or empty JWKS documents", async () => {

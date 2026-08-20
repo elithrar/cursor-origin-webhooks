@@ -1,3 +1,4 @@
+import { Result, type Result as ResultType } from "better-result";
 import { WebhookKeyUnavailable } from "../errors.js";
 
 const JWKS_URL = "https://api.cursor.com/v1/origin/keys";
@@ -46,55 +47,77 @@ function cacheTtl(response: Response): number {
   return Math.min(MAX_TTL_MS, Math.max(0, ttl));
 }
 
-async function fetchKeys(): Promise<CachedKeys> {
-  try {
-    const response = await fetch(JWKS_URL, {
-      headers: { accept: "application/json" },
-    });
+function unavailable(message: string): WebhookKeyUnavailable {
+  return new WebhookKeyUnavailable({ cause: new Error(message) });
+}
+
+async function fetchKeys(): Promise<ResultType<CachedKeys, WebhookKeyUnavailable>> {
+  return Result.gen(async function* () {
+    const response = yield* Result.await(
+      Result.tryPromise({
+        try: () => fetch(JWKS_URL, {
+          headers: { accept: "application/json" },
+        }),
+        catch: (cause) => new WebhookKeyUnavailable({ cause }),
+      }),
+    );
     if (!response.ok) {
-      throw new Error(`Cursor JWKS request failed with HTTP ${response.status}.`);
+      return Result.err(
+        unavailable(`Cursor JWKS request failed with HTTP ${response.status}.`),
+      );
     }
 
-    const value = (await response.json()) as unknown;
+    const value = yield* Result.await(
+      Result.tryPromise({
+        try: async () => (await response.json()) as unknown,
+        catch: (cause) => new WebhookKeyUnavailable({ cause }),
+      }),
+    );
     if (!isRecord(value) || !Array.isArray(value.keys)) {
-      throw new Error("Cursor JWKS response is malformed.");
+      return Result.err(unavailable("Cursor JWKS response is malformed."));
     }
 
     const jwks = value.keys.filter(isEd25519Jwk);
     if (jwks.length === 0) {
-      throw new Error("Cursor JWKS response contains no usable Ed25519 keys.");
+      return Result.err(
+        unavailable("Cursor JWKS response contains no usable Ed25519 keys."),
+      );
     }
 
-    const imported = await Promise.all(
-      jwks.map((jwk) =>
-        crypto.subtle.importKey("jwk", jwk, { name: "Ed25519" }, false, ["verify"]),
-      ),
+    const imported = yield* Result.await(
+      Result.tryPromise({
+        try: () => Promise.all(
+          jwks.map((jwk) =>
+            crypto.subtle.importKey("jwk", jwk, { name: "Ed25519" }, false, ["verify"]),
+          ),
+        ),
+        catch: (cause) => new WebhookKeyUnavailable({ cause }),
+      }),
     );
 
     const fetchedAt = Date.now();
-    return {
+    return Result.ok({
       keys: imported,
       fetchedAt,
       expiresAt: fetchedAt + cacheTtl(response),
-    };
-  } catch (cause) {
-    if (cause instanceof WebhookKeyUnavailable) {
-      throw cause;
-    }
-    throw new WebhookKeyUnavailable({ cause });
-  }
+    });
+  });
 }
 
-async function refreshKeys(): Promise<CachedKeys> {
+async function refreshKeys(): Promise<ResultType<CachedKeys, WebhookKeyUnavailable>> {
   // Do not retain the in-flight fetch promise globally. Workerd associates I/O
   // with the request that created it, so another request cannot safely await
   // that promise. The resolved CryptoKeys are safe to reuse across requests.
   const refreshed = await fetchKeys();
-  cachedKeys = refreshed;
+  if (refreshed.isOk()) {
+    cachedKeys = refreshed.value;
+  }
   return refreshed;
 }
 
-export async function getWebhookKeys(forceRefresh = false): Promise<readonly CryptoKey[]> {
+export async function getWebhookKeys(
+  forceRefresh = false,
+): Promise<ResultType<readonly CryptoKey[], WebhookKeyUnavailable>> {
   const now = Date.now();
 
   if (
@@ -102,8 +125,8 @@ export async function getWebhookKeys(forceRefresh = false): Promise<readonly Cry
     ((!forceRefresh && now < cachedKeys.expiresAt) ||
       (forceRefresh && now - cachedKeys.fetchedAt < FORCED_REFRESH_COOLDOWN_MS))
   ) {
-    return cachedKeys.keys;
+    return Result.ok(cachedKeys.keys);
   }
 
-  return (await refreshKeys()).keys;
+  return (await refreshKeys()).map((value) => value.keys);
 }

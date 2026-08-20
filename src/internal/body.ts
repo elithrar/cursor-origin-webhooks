@@ -1,58 +1,65 @@
+import { Result, type Result as ResultType } from "better-result";
 import {
   InvalidWebhookJson,
   WebhookBodyTooLarge,
   WebhookBodyUnavailable,
 } from "../errors.js";
 
+type ReadRequestBodyError = WebhookBodyTooLarge | WebhookBodyUnavailable;
+
 export async function readRequestBody(
   request: Request,
   maxBodyBytes: number,
-): Promise<Uint8Array> {
+): Promise<ResultType<Uint8Array, ReadRequestBodyError>> {
   const contentLength = request.headers.get("content-length");
   if (contentLength !== null && /^\d+$/.test(contentLength)) {
     const declaredLength = Number(contentLength);
     if (Number.isSafeInteger(declaredLength) && declaredLength > maxBodyBytes) {
-      throw new WebhookBodyTooLarge(maxBodyBytes);
+      return Result.err(new WebhookBodyTooLarge(maxBodyBytes));
     }
   }
 
-  if (request.body === null) {
-    return new Uint8Array();
+  const bodyStream = request.body;
+  if (bodyStream === null) {
+    return Result.ok(new Uint8Array());
   }
 
-  let reader: ReadableStreamDefaultReader<Uint8Array>;
-  try {
-    reader = request.body.getReader();
-  } catch (cause) {
-    throw new WebhookBodyUnavailable({ cause });
+  const readerResult = Result.try({
+    try: () => bodyStream.getReader(),
+    catch: (cause) => new WebhookBodyUnavailable({ cause }),
+  });
+  if (readerResult.isErr()) {
+    return readerResult;
   }
+  const reader = readerResult.value;
 
   const chunks: Uint8Array[] = [];
   let totalBytes = 0;
 
   try {
     while (true) {
-      const { done, value } = await reader.read();
+      const readResult = await Result.tryPromise({
+        try: () => reader.read(),
+        catch: (cause) => new WebhookBodyUnavailable({ cause }),
+      });
+      if (readResult.isErr()) {
+        return readResult;
+      }
+
+      const { done, value } = readResult.value;
       if (done) {
         break;
       }
 
       totalBytes += value.byteLength;
       if (totalBytes > maxBodyBytes) {
-        try {
-          await reader.cancel();
-        } catch {
-          // The size error is authoritative.
-        }
-        throw new WebhookBodyTooLarge(maxBodyBytes);
+        // The size error is authoritative, so deliberately discard any
+        // cancellation failure after asking the stream to stop producing data.
+        await Result.tryPromise(() => reader.cancel());
+        return Result.err(new WebhookBodyTooLarge(maxBodyBytes));
       }
       chunks.push(value);
     }
-  } catch (cause) {
-    if (cause instanceof WebhookBodyTooLarge) {
-      throw cause;
-    }
-    throw new WebhookBodyUnavailable({ cause });
   } finally {
     reader.releaseLock();
   }
@@ -63,14 +70,17 @@ export async function readRequestBody(
     body.set(chunk, offset);
     offset += chunk.byteLength;
   }
-  return body;
+  return Result.ok(body);
 }
 
-export function parseJsonBody(body: Uint8Array): unknown {
-  try {
-    const text = new TextDecoder("utf-8", { fatal: true }).decode(body);
-    return JSON.parse(text) as unknown;
-  } catch (cause) {
-    throw new InvalidWebhookJson({ cause });
-  }
+export function parseJsonBody(
+  body: Uint8Array,
+): ResultType<unknown, InvalidWebhookJson> {
+  return Result.try({
+    try: () => {
+      const text = new TextDecoder("utf-8", { fatal: true }).decode(body);
+      return JSON.parse(text) as unknown;
+    },
+    catch: (cause) => new InvalidWebhookJson({ cause }),
+  });
 }
