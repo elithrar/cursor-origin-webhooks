@@ -50,6 +50,9 @@
     "ed25519"
   ],
   "license": "Apache-2.0",
+  "dependencies": {
+    "better-result": "^3.0.1"
+  },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.22.0",
     "@cloudflare/workers-types": "^5.20260819.1",

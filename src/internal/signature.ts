@@ -1,4 +1,8 @@
-import { InvalidWebhookSignature } from "../errors.js";
+import { Result, type Result as ResultType } from "better-result";
+import {
+  InvalidWebhookSignature,
+  type WebhookKeyUnavailable,
+} from "../errors.js";
 import { getWebhookKeys } from "./jwks.js";
 
 const ED25519_SIGNATURE_BYTES = 64;
@@ -13,16 +17,16 @@ function decodeBase64(value: string): Uint8Array<ArrayBuffer> | undefined {
     return undefined;
   }
 
-  try {
-    const decoded = atob(value);
-    const bytes = new Uint8Array(decoded.length);
-    for (let index = 0; index < decoded.length; index += 1) {
-      bytes[index] = decoded.charCodeAt(index);
-    }
-    return bytes.byteLength === ED25519_SIGNATURE_BYTES ? bytes : undefined;
-  } catch {
+  const decoded = Result.try(() => atob(value));
+  if (decoded.isErr()) {
     return undefined;
   }
+
+  const bytes = new Uint8Array(decoded.value.length);
+  for (let index = 0; index < decoded.value.length; index += 1) {
+    bytes[index] = decoded.value.charCodeAt(index);
+  }
+  return bytes.byteLength === ED25519_SIGNATURE_BYTES ? bytes : undefined;
 }
 
 function parseSignatures(header: string): readonly Uint8Array<ArrayBuffer>[] {
@@ -58,14 +62,14 @@ async function verifyWithKeys(
 ): Promise<boolean> {
   for (const key of keys) {
     for (const signature of signatures) {
-      try {
-        if (await crypto.subtle.verify("Ed25519", key, signature, message)) {
-          return true;
-        }
-      } catch {
-        // Ignore a key/signature pair that the runtime cannot verify and try
-        // the remaining active keys.
+      const verified = await Result.tryPromise(() =>
+        crypto.subtle.verify("Ed25519", key, signature, message),
+      );
+      if (verified.isOk() && verified.value) {
+        return true;
       }
+      // Ignore a key/signature pair that the runtime cannot verify and try
+      // the remaining active keys.
     }
   }
   return false;
@@ -76,29 +80,32 @@ export async function verifySignature(
   timestamp: string,
   signatureHeader: string,
   body: Uint8Array,
-): Promise<void> {
+): Promise<ResultType<void, InvalidWebhookSignature | WebhookKeyUnavailable>> {
   const signatures = parseSignatures(signatureHeader);
   if (signatures.length === 0) {
-    throw new InvalidWebhookSignature();
+    return Result.err(new InvalidWebhookSignature());
   }
 
   const digest = await crypto.subtle.digest("SHA-256", signedBytes(id, timestamp, body));
   const message = new TextEncoder().encode(lowercaseHex(digest));
   const keys = await getWebhookKeys();
-
-  if (await verifyWithKeys(keys, signatures, message)) {
-    return;
+  if (keys.isErr()) {
+    return keys;
   }
 
-  try {
-    const refreshedKeys = await getWebhookKeys(true);
-    if (await verifyWithKeys(refreshedKeys, signatures, message)) {
-      return;
-    }
-  } catch {
-    // A still-fresh key set was available. Preserve the authentication result
-    // instead of turning an invalid request into a remote availability error.
+  if (await verifyWithKeys(keys.value, signatures, message)) {
+    return Result.ok();
   }
 
-  throw new InvalidWebhookSignature();
+  const refreshedKeys = await getWebhookKeys(true);
+  if (
+    refreshedKeys.isOk() &&
+    await verifyWithKeys(refreshedKeys.value, signatures, message)
+  ) {
+    return Result.ok();
+  }
+  // A still-fresh key set was available. Preserve the authentication result
+  // instead of turning an invalid request into a remote availability error.
+
+  return Result.err(new InvalidWebhookSignature());
 }

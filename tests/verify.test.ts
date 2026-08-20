@@ -11,6 +11,16 @@ async function loadLibrary() {
   return import("../src/index.js");
 }
 
+async function settleFetchRetries(
+  fetchMock: ReturnType<typeof vi.fn>,
+  startedAttempts = 1,
+): Promise<void> {
+  await vi.waitFor(() => {
+    expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(startedAttempts);
+  });
+  await vi.runAllTimersAsync();
+}
+
 describe("verifyWebhook", () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -19,6 +29,7 @@ describe("verifyWebhook", () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     vi.unstubAllGlobals();
     vi.useRealTimers();
   });
@@ -37,7 +48,10 @@ describe("verifyWebhook", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock).toHaveBeenCalledWith(
       "https://api.cursor.com/v1/origin/keys",
-      { headers: { accept: "application/json" } },
+      {
+        headers: { accept: "application/json" },
+        signal: expect.any(AbortSignal),
+      },
     );
   });
 
@@ -69,6 +83,20 @@ describe("verifyWebhook", () => {
         }),
       ),
     ).resolves.toMatchObject({ deliveryId: "whd_test" });
+  });
+
+  it("keeps usable keys when another matching JWK cannot be imported", async () => {
+    const key = createTestKey();
+    const invalidJwk = { ...key.publicJwk, x: "not-valid-base64url" };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(jwksResponse([invalidJwk, key.publicJwk])),
+    );
+    const { verifyWebhook } = await loadLibrary();
+
+    await expect(verifyWebhook(signedRequest(key))).resolves.toMatchObject({
+      deliveryId: "whd_test",
+    });
   });
 
   it.each([
@@ -155,6 +183,44 @@ describe("verifyWebhook", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("does not let an older concurrent refresh overwrite newer keys", async () => {
+    const oldKey = createTestKey();
+    const newKey = createTestKey();
+    let resolveOldResponse!: (response: Response) => void;
+    let resolveNewResponse!: (response: Response) => void;
+    const oldResponse = new Promise<Response>((resolve) => {
+      resolveOldResponse = resolve;
+    });
+    const newResponse = new Promise<Response>((resolve) => {
+      resolveNewResponse = resolve;
+    });
+    const fetchMock = vi
+      .fn()
+      .mockReturnValueOnce(oldResponse)
+      .mockReturnValueOnce(newResponse);
+    vi.stubGlobal("fetch", fetchMock);
+    const { verifyWebhook } = await loadLibrary();
+
+    const oldVerification = verifyWebhook(signedRequest(oldKey));
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    const newVerification = verifyWebhook(signedRequest(newKey));
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+
+    resolveNewResponse(jwksResponse([newKey.publicJwk]));
+    await expect(newVerification).resolves.toMatchObject({
+      deliveryId: "whd_test",
+    });
+    resolveOldResponse(jwksResponse([oldKey.publicJwk]));
+    await expect(oldVerification).resolves.toMatchObject({
+      deliveryId: "whd_test",
+    });
+
+    await expect(verifyWebhook(signedRequest(newKey))).resolves.toMatchObject({
+      deliveryId: "whd_test",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it.each(["no-store", "no-cache"])(
     "does not reuse keys when Cache-Control contains %s",
     async (directive) => {
@@ -198,19 +264,22 @@ describe("verifyWebhook", () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(jwksResponse([key.publicJwk], "public, max-age=1"))
-      .mockRejectedValueOnce(new Error("network down"));
+      .mockRejectedValue(new Error("network down"));
     vi.stubGlobal("fetch", fetchMock);
     const { WebhookKeyUnavailable, verifyWebhook } = await loadLibrary();
 
     await verifyWebhook(signedRequest(key));
     vi.advanceTimersByTime(2_000);
 
-    await expect(
-      verifyWebhook(signedRequest(key, {
-        timestamp: Math.floor(Date.now() / 1000),
-      })),
-    ).rejects.toBeInstanceOf(WebhookKeyUnavailable);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const verification = verifyWebhook(signedRequest(key, {
+      timestamp: Math.floor(Date.now() / 1000),
+    }));
+    const assertion = expect(verification).rejects.toBeInstanceOf(
+      WebhookKeyUnavailable,
+    );
+    await settleFetchRetries(fetchMock, 2);
+    await assertion;
+    expect(fetchMock).toHaveBeenCalledTimes(5);
   });
 
   it("refreshes once after a likely key rotation", async () => {
@@ -234,6 +303,103 @@ describe("verifyWebhook", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it("keeps an invalid signature authoritative when forced key refresh fails", async () => {
+    const key = createTestKey();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jwksResponse([key.publicJwk]))
+      .mockRejectedValue(new Error("network down"));
+    vi.stubGlobal("fetch", fetchMock);
+    const { InvalidWebhookSignature, verifyWebhook } = await loadLibrary();
+
+    await verifyWebhook(signedRequest(key));
+    vi.advanceTimersByTime(61_000);
+
+    const verification = verifyWebhook(signedRequest(key, {
+      signature: Buffer.alloc(64).toString("base64"),
+      timestamp: Math.floor(Date.now() / 1000),
+    }));
+    const assertion = expect(verification).rejects.toBeInstanceOf(
+      InvalidWebhookSignature,
+    );
+    await settleFetchRetries(fetchMock, 2);
+    await assertion;
+    await expect(
+      verifyWebhook(signedRequest(key, {
+        signature: Buffer.alloc(64).toString("base64"),
+        timestamp: Math.floor(Date.now() / 1000),
+      })),
+    ).rejects.toBeInstanceOf(InvalidWebhookSignature);
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+  });
+
+  it.each([
+    ["network failures", () => Promise.reject(new TypeError("network down"))],
+    [
+      "5xx responses",
+      () => Promise.resolve(new Response("no", { status: 503 })),
+    ],
+  ])("retries %s three times", async (_label, failure) => {
+    const key = createTestKey();
+    const fetchMock = vi
+      .fn()
+      .mockImplementationOnce(failure)
+      .mockImplementationOnce(failure)
+      .mockImplementationOnce(failure)
+      .mockResolvedValueOnce(jwksResponse([key.publicJwk]));
+    vi.stubGlobal("fetch", fetchMock);
+    const { verifyWebhook } = await loadLibrary();
+
+    const verification = verifyWebhook(signedRequest(key));
+    const assertion = expect(verification).resolves.toMatchObject({
+      deliveryId: "whd_test",
+    });
+    await settleFetchRetries(fetchMock);
+
+    await assertion;
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  it("does not retry non-5xx HTTP failures", async () => {
+    const key = createTestKey();
+    const fetchMock = vi.fn().mockResolvedValue(new Response("no", { status: 429 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { WebhookKeyUnavailable, verifyWebhook } = await loadLibrary();
+
+    await expect(verifyWebhook(signedRequest(key))).rejects.toBeInstanceOf(
+      WebhookKeyUnavailable,
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("times out each JWKS attempt after five seconds", async () => {
+    const key = createTestKey();
+    const timeoutSpy = vi
+      .spyOn(AbortSignal, "timeout")
+      .mockImplementation((delay) => {
+        expect(delay).toBe(5_000);
+        return AbortSignal.abort(new DOMException("timed out", "TimeoutError"));
+      });
+    const fetchMock = vi.fn((_url: string, init?: RequestInit) => {
+      const signal = init?.signal;
+      return Promise.reject(
+        signal instanceof AbortSignal ? signal.reason : new Error("no signal"),
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const { WebhookKeyUnavailable, verifyWebhook } = await loadLibrary();
+
+    const verification = verifyWebhook(signedRequest(key));
+    const assertion = expect(verification).rejects.toBeInstanceOf(
+      WebhookKeyUnavailable,
+    );
+    await settleFetchRetries(fetchMock);
+
+    await assertion;
+    expect(timeoutSpy).toHaveBeenCalledTimes(4);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
   it("does not amplify invalid signatures into repeated JWKS fetches", async () => {
     const key = createTestKey();
     const fetchMock = vi.fn().mockResolvedValue(jwksResponse([key.publicJwk]));
@@ -251,13 +417,19 @@ describe("verifyWebhook", () => {
   });
 
   it("fails closed when the initial JWKS fetch fails", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network down")));
+    const networkError = new Error("network down");
+    const fetchMock = vi.fn().mockRejectedValue(networkError);
+    vi.stubGlobal("fetch", fetchMock);
     const { WebhookKeyUnavailable, verifyWebhook } = await loadLibrary();
     const key = createTestKey();
-
-    await expect(verifyWebhook(signedRequest(key))).rejects.toBeInstanceOf(
+    const verification = verifyWebhook(signedRequest(key));
+    const instanceAssertion = expect(verification).rejects.toBeInstanceOf(
       WebhookKeyUnavailable,
     );
+    await settleFetchRetries(fetchMock);
+
+    await instanceAssertion;
+    await expect(verification).rejects.toHaveProperty("cause", networkError);
   });
 
   it("rejects malformed or empty JWKS documents", async () => {
@@ -266,14 +438,43 @@ describe("verifyWebhook", () => {
       Response.json({}),
       Response.json({ keys: [] }),
       Response.json({ keys: [{ kty: "RSA" }] }),
+      jwksResponse([
+        { kty: "OKP", crv: "Ed25519", x: "not-valid-base64url" },
+      ]),
       new Response("no", { status: 503 }),
     ]) {
       vi.resetModules();
-      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response));
+      const fetchMock = vi.fn().mockResolvedValue(response);
+      vi.stubGlobal("fetch", fetchMock);
       const { WebhookKeyUnavailable, verifyWebhook } = await loadLibrary();
-      await expect(verifyWebhook(signedRequest(key))).rejects.toBeInstanceOf(
+      const verification = verifyWebhook(signedRequest(key));
+      const assertion = expect(verification).rejects.toBeInstanceOf(
         WebhookKeyUnavailable,
       );
+      await settleFetchRetries(fetchMock);
+      await assertion;
+    }
+  });
+
+  it("does not hide an unexpected defect during forced refresh", async () => {
+    const defect = new Error("unexpected defect");
+    const { Result } = await import("better-result");
+    const getWebhookKeys = vi
+      .fn()
+      .mockResolvedValueOnce(Result.ok([]))
+      .mockRejectedValueOnce(defect);
+    vi.doMock("../src/internal/jwks.js", () => ({ getWebhookKeys }));
+
+    try {
+      const { verifySignature } = await import("../src/internal/signature.js");
+      const signature = `v1ed,${Buffer.alloc(64).toString("base64")}`;
+
+      await expect(
+        verifySignature("whd_test", "0", signature, new Uint8Array()),
+      ).rejects.toBe(defect);
+    } finally {
+      vi.doUnmock("../src/internal/jwks.js");
+      vi.resetModules();
     }
   });
 

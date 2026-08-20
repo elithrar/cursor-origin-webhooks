@@ -1,8 +1,8 @@
 # cursor-origin-webhooks
 
 `cursor-origin-webhooks` verifies Cursor Origin webhook requests and returns a
-typed event payload. It uses Web Crypto, has no runtime dependencies, and works
-in Cloudflare Workers, Deno, Bun, and Node.js.
+typed event payload. It uses Web Crypto and works in Cloudflare Workers, Deno,
+Bun, and Node.js.
 
 The library handles the details that are easy to get wrong:
 
