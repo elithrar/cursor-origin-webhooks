@@ -234,6 +234,27 @@ describe("verifyWebhook", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it("keeps an invalid signature authoritative when forced key refresh fails", async () => {
+    const key = createTestKey();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jwksResponse([key.publicJwk]))
+      .mockRejectedValueOnce(new Error("network down"));
+    vi.stubGlobal("fetch", fetchMock);
+    const { InvalidWebhookSignature, verifyWebhook } = await loadLibrary();
+
+    await verifyWebhook(signedRequest(key));
+    vi.advanceTimersByTime(61_000);
+
+    await expect(
+      verifyWebhook(signedRequest(key, {
+        signature: Buffer.alloc(64).toString("base64"),
+        timestamp: Math.floor(Date.now() / 1000),
+      })),
+    ).rejects.toBeInstanceOf(InvalidWebhookSignature);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it("does not amplify invalid signatures into repeated JWKS fetches", async () => {
     const key = createTestKey();
     const fetchMock = vi.fn().mockResolvedValue(jwksResponse([key.publicJwk]));

@@ -5,6 +5,7 @@ import {
   InvalidWebhookPayload,
   InvalidWebhookTimestamp,
   MissingWebhookHeader,
+  type WebhookVerificationError,
 } from "./errors.js";
 import { parseJsonBody, readRequestBody } from "./internal/body.js";
 import { verifySignature } from "./internal/signature.js";
@@ -207,7 +208,7 @@ function nonNegativeInteger(
 async function verifyWebhookResult(
   request: Request,
   opts: WebhookOptions,
-) {
+): Promise<ResultType<OriginWebhook, WebhookVerificationError | RangeError>> {
   return Result.gen(async function* () {
     if (request.method !== "POST") {
       return Result.err(new InvalidWebhookMethod(request.method));
