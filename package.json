@@ -55,15 +55,15 @@
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.22.0",
-    "@cloudflare/workers-types": "^5.20260819.1",
-    "@types/node": "^26.0.0",
+    "@cloudflare/workers-types": "^5.20260828.1",
+    "@types/node": "^26.4.0",
     "@vitest/coverage-v8": "^4.1.11",
-    "deno": "^2.9.5",
+    "deno": "^2.9.6",
     "openapi-typescript": "^7.13.0",
     "publint": "^0.3.24",
     "typescript": "^5.9.3",
     "vitest": "^4.1.11",
-    "wrangler": "^4.124.0",
-    "yaml": "^2.8.1"
+    "wrangler": "^4.127.1",
+    "yaml": "^2.9.0"
   }
 }
